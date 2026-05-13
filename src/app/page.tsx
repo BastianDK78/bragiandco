@@ -63,12 +63,12 @@ export default function MaintenancePage() {
             marginBottom: '2rem',
           }}
         >
-          We are building something for enterprise teams navigating the EU AI Act.
+          AI strategy and compliance advisory for enterprise teams.
           Launching soon.
         </p>
 
         <a
-          href="mailto:bastian@bragiandco.com"
+          href="mailto:info@bragiandco.com"
           style={{
             display: 'inline-block',
             fontSize: '0.88rem',
@@ -79,7 +79,7 @@ export default function MaintenancePage() {
             paddingBottom: '2px',
           }}
         >
-          bastian@bragiandco.com
+          info@bragiandco.com
         </a>
       </div>
 
