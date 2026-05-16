@@ -1,21 +1,50 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useCallback } from 'react';
 import type { FindingRow } from '@/data/heatmap.types';
 
-// ── Risk badge ─────────────────────────────────────────────────────────────
+// ── Add to Stack button ──────────────────────────────────────────────────────
 
-function RiskPill({ level }: { level: FindingRow['risk_level'] }) {
-  const styles = {
-    red:        'bg-[#C0392B] text-white',
-    yellow:     'bg-[#C4985A] text-[#1C1C1C]',
-    unverified: 'bg-[#C4B8A0] text-[#1C1C1C]',
-  };
-  const labels = { red: 'Red', yellow: 'Yellow', unverified: 'Unverified' };
+function StackToggle({ vendorId, vendorName, isInStack, onToggle }: {
+  vendorId: string;
+  vendorName: string;
+  isInStack: boolean;
+  onToggle: (vendorId: string) => void;
+}) {
   return (
-    <span className={`inline-flex items-center text-[0.62rem] font-bold tracking-[0.07em] uppercase
-                      rounded-full px-[0.7em] py-[0.22em] whitespace-nowrap ${styles[level]}`}>
-      {labels[level]}
+    <button
+      onClick={() => onToggle(vendorId)}
+      title={isInStack ? `Remove ${vendorName} from My Stack` : `Add ${vendorName} to My Stack`}
+      className="inline-flex items-center justify-center w-5 h-5 rounded transition-colors shrink-0"
+      style={{
+        background: isInStack ? 'var(--oak)' : 'transparent',
+        color: isInStack ? 'var(--paper)' : 'var(--slate)',
+        border: isInStack ? 'none' : '1px solid rgba(17,19,21,0.16)',
+        fontSize: '0.75rem',
+        fontWeight: 600,
+        cursor: 'pointer',
+      }}
+    >
+      {isInStack ? '✓' : '+'}
+    </button>
+  );
+}
+
+// ── Risk indicator (restrained, no alarmist colors) ──────────────────────────
+
+function RiskIndicator({ level }: { level: FindingRow['risk_level'] }) {
+  const config = {
+    red:        { bg: 'rgba(17, 19, 21, 0.90)', text: '#F7F4EF', label: 'High' },
+    yellow:     { bg: 'rgba(138, 107, 74, 0.18)', text: '#111315', label: 'Medium' },
+    unverified: { bg: 'rgba(110, 116, 120, 0.12)', text: '#6E7478', label: 'Unverified' },
+  };
+  const { bg, text, label } = config[level];
+  return (
+    <span
+      className="inline-flex items-center text-[0.68rem] font-medium tracking-[0.03em] px-[0.7em] py-[0.25em] whitespace-nowrap"
+      style={{ background: bg, color: text, borderRadius: '4px' }}
+    >
+      {label}
     </span>
   );
 }
@@ -23,18 +52,12 @@ function RiskPill({ level }: { level: FindingRow['risk_level'] }) {
 // ── Default state cell ──────────────────────────────────────────────────────
 
 function StateCell({ state, note }: { state: string; note?: string }) {
-  const isOn = state === 'On by default' || state === 'On when feature licensed';
-  const isOptIn = state === 'Opt-in';
-
+  const isHigh = state === 'On by default' || state === 'On when feature licensed';
   return (
-    <span className={`text-[0.78rem] leading-snug ${
-      isOn     ? 'text-[#B0864A] font-bold' :
-      isOptIn  ? 'text-[#9B9B8C]' :
-                 'text-[#9B9B8C] italic'
-    }`}>
+    <span className="text-[0.78rem] leading-snug" style={{ color: isHigh ? 'var(--oak)' : 'var(--slate)' }}>
       {state}
       {note && (
-        <span className="block mt-0.5 font-normal not-italic text-[0.7rem] text-[#9B9B8C]">
+        <span className="block mt-0.5 text-[0.7rem]" style={{ color: 'var(--slate)', fontWeight: 400 }}>
           {note}
         </span>
       )}
@@ -46,17 +69,52 @@ function StateCell({ state, note }: { state: string; note?: string }) {
 
 interface Props {
   rows: FindingRow[];
+  initialStack?: string[]; // vendor_ids already in user's portfolio
 }
 
-export function HeatmapTable({ rows }: Props) {
+export function HeatmapTable({ rows, initialStack = [] }: Props) {
   const [filterVendor, setFilterVendor] = useState<string>('all');
   const [filterRisk, setFilterRisk] = useState<string>('all');
+  const [stack, setStack] = useState<Set<string>>(new Set(initialStack));
 
-  // Derive vendor list from live data — stays in sync as DB grows
   const vendors = useMemo(
-    () => [...new Set(rows.map((r) => r.vendor_name))],
+    () => [...new Set(rows.map((r) => r.vendor_name))].sort(),
     [rows]
   );
+
+  // Map vendor_name → vendor_id for the toggle
+  const vendorIdMap = useMemo(() => {
+    const m = new Map<string, string>();
+    rows.forEach((r) => m.set(r.vendor_name, r.vendor_id));
+    return m;
+  }, [rows]);
+
+  const handleStackToggle = useCallback(async (vendorId: string) => {
+    const isRemoving = stack.has(vendorId);
+    // Optimistic update
+    setStack((prev) => {
+      const next = new Set(prev);
+      if (isRemoving) next.delete(vendorId);
+      else next.add(vendorId);
+      return next;
+    });
+    // Fire API call (non-blocking)
+    try {
+      await fetch('/api/portfolio', {
+        method: isRemoving ? 'DELETE' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ vendor_id: vendorId }),
+      });
+    } catch {
+      // Revert on failure
+      setStack((prev) => {
+        const next = new Set(prev);
+        if (isRemoving) next.add(vendorId);
+        else next.delete(vendorId);
+        return next;
+      });
+    }
+  }, [stack]);
 
   const filtered = useMemo(() => rows.filter((r) => {
     if (filterVendor !== 'all' && r.vendor_name !== filterVendor) return false;
@@ -70,87 +128,99 @@ export function HeatmapTable({ rows }: Props) {
   return (
     <div>
       {/* ── Summary strip ──────────────────────────────────────────── */}
-      <div className="grid grid-cols-3 gap-4 mb-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
         {([
-          { value: redCount,    label: 'Red findings',         sub: 'Immediate deployer action required',          numClass: 'text-[#B0864A]' },
-          { value: yellowCount, label: 'Yellow findings',      sub: 'Confirm feature configuration in admin',      numClass: 'text-[#1C1C1C]' },
-          { value: 81,          label: 'Days to enforcement',  sub: 'August 2, 2026 — Articles 9-15 in force',     numClass: 'text-[#B0864A]' },
-        ] as const).map(({ value, label, sub, numClass }) => (
+          { value: redCount,    label: 'High-risk findings',  sub: 'Deployer action required before August 2' },
+          { value: yellowCount, label: 'Medium-risk findings', sub: 'Configuration audit recommended' },
+          { value: 78,          label: 'Days to enforcement',  sub: 'EU AI Act Articles 9-15 take effect' },
+        ] as const).map(({ value, label, sub }) => (
           <article
             key={label}
-            className="bg-white border-t-[3px] border-[#C4985A] rounded-[2px] px-6 py-5"
+            style={{ background: 'var(--mist)', borderRadius: '8px', padding: '1.5rem 1.75rem' }}
           >
-            <div className={`text-[clamp(2.5rem,4.5vw,3.4rem)] font-extrabold leading-none tracking-tight tabular-nums mb-3 ${numClass}`}>
+            <div className="text-[clamp(2.25rem,4vw,3rem)] font-medium leading-none tracking-tight tabular-nums mb-2" style={{ fontFamily: 'var(--font-mono)', color: 'var(--coal)' }}>
               {value}
             </div>
-            <div className="text-[0.7rem] font-bold uppercase tracking-[0.1em] text-[#9B9B8C] mb-1">
+            <div className="eyebrow" style={{ color: 'var(--slate)', marginBottom: '0.25rem', textTransform: 'uppercase' }}>
               {label}
             </div>
-            <div className="text-[0.82rem] text-[#9B9B8C] leading-snug">{sub}</div>
+            <div className="text-[0.8rem]" style={{ color: 'var(--slate)', lineHeight: 1.4 }}>{sub}</div>
           </article>
         ))}
       </div>
 
       {/* ── Filter bar ─────────────────────────────────────────────── */}
-      <div className="flex items-center gap-6 flex-wrap pb-4 mb-0 border-b border-[#C4B8A0]">
-        {/* Vendor pills */}
-        <div className="flex flex-wrap gap-1.5 flex-1 min-w-0">
-          {(['all', ...vendors]).map((v) => (
-            <button
-              key={v}
-              onClick={() => setFilterVendor(v)}
-              className={`text-[0.72rem] font-medium px-[0.85rem] py-[0.35rem] rounded-full
-                          border border-[#C4985A] transition-colors whitespace-nowrap
-                          ${filterVendor === v
-                            ? 'bg-[#C4985A] text-[#F5F0E8] font-bold'
-                            : 'bg-transparent text-[#1C1C1C] hover:bg-[#C4985A]/10'}`}
-            >
-              {v === 'all' ? 'All vendors' : v}
-            </button>
-          ))}
+      <div className="flex items-center gap-4 flex-wrap pb-4 mb-0" style={{ borderBottom: 'var(--border-rule)' }}>
+        {/* Vendor select */}
+        <div className="flex items-center gap-2">
+          <label className="eyebrow" style={{ color: 'var(--slate)', textTransform: 'uppercase' }}>Vendor</label>
+          <select
+            value={filterVendor}
+            onChange={(e) => setFilterVendor(e.target.value)}
+            className="text-[0.8rem] font-medium px-3 py-1.5 pr-8 appearance-none cursor-pointer"
+            style={{
+              fontFamily: 'var(--font-sans)',
+              color: 'var(--coal)',
+              background: '#fff',
+              border: 'var(--border-rule)',
+              borderRadius: '4px',
+            }}
+          >
+            <option value="all">All ({rows.length})</option>
+            {vendors.map((v) => (
+              <option key={v} value={v}>{v}</option>
+            ))}
+          </select>
         </div>
 
-        {/* Risk dropdown */}
-        <div className="flex items-center gap-2 shrink-0">
-          <label className="text-[0.68rem] font-bold uppercase tracking-[0.08em] text-[#9B9B8C]">
-            Risk
-          </label>
+        {/* Risk select */}
+        <div className="flex items-center gap-2">
+          <label className="eyebrow" style={{ color: 'var(--slate)', textTransform: 'uppercase' }}>Risk</label>
           <select
             value={filterRisk}
             onChange={(e) => setFilterRisk(e.target.value)}
-            className="font-[Inter,sans-serif] text-[0.78rem] font-medium text-[#1C1C1C]
-                       bg-white border border-[#C4985A] rounded-[2px] px-3 py-1.5 pr-8
-                       appearance-none cursor-pointer
-                       bg-[url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2210%22 height=%226%22 viewBox=%220 0 10 6%22><path d=%22M1 1l4 4 4-4%22 stroke=%22%23C4985A%22 stroke-width=%221.5%22 fill=%22none%22 stroke-linecap=%22square%22/></svg>')]
-                       bg-no-repeat bg-[right_0.7rem_center]"
+            className="text-[0.8rem] font-medium px-3 py-1.5 pr-8 appearance-none cursor-pointer"
+            style={{
+              fontFamily: 'var(--font-sans)',
+              color: 'var(--coal)',
+              background: '#fff',
+              border: 'var(--border-rule)',
+              borderRadius: '4px',
+            }}
           >
             <option value="all">All</option>
-            <option value="red">Red</option>
-            <option value="yellow">Yellow</option>
-            <option value="unverified">Unverified</option>
+            <option value="red">High</option>
+            <option value="yellow">Medium</option>
           </select>
         </div>
+
+        <span className="ml-auto flex items-center gap-4 text-[0.75rem]" style={{ color: 'var(--slate)', fontFamily: 'var(--font-mono)' }}>
+          {stack.size > 0 && (
+            <span style={{ color: 'var(--oak)' }}>
+              My Stack: {stack.size} vendors
+            </span>
+          )}
+          <span>{filtered.length} of {rows.length} findings</span>
+        </span>
       </div>
 
       {/* ── Table ──────────────────────────────────────────────────── */}
-      <div className="mt-0 overflow-x-auto border border-[#C4B8A0] rounded-[2px] bg-white">
-        <table className="w-full border-collapse text-[0.82rem]" style={{ minWidth: '1120px' }}>
+      <div className="mt-0 overflow-x-auto" style={{ borderRadius: '8px', border: 'var(--border-rule)' }}>
+        <table className="w-full border-collapse text-[0.8rem]" style={{ minWidth: '1080px' }}>
           <thead>
-            <tr>
+            <tr style={{ background: 'var(--coal)' }}>
               {[
-                ['Vendor',                  '13%'],
-                ['Feature / AI Capability', '25%'],
-                ['Risk',                    '9%'],
-                ['Default state',           '12%'],
-                ['Annex III category',      '16%'],
+                ['Vendor',                  '14%'],
+                ['Feature',                 '24%'],
+                ['Risk',                    '8%'],
+                ['Default state',           '13%'],
+                ['Annex III',               '16%'],
                 ['Deployer obligation gap', '25%'],
               ].map(([label, width]) => (
                 <th
                   key={label}
-                  style={{ width }}
-                  className="bg-[#1C1C1C] text-[#F5F0E8] font-bold text-[0.66rem] uppercase
-                             tracking-[0.08em] text-left px-4 py-[0.85rem] align-middle
-                             first:pl-5 last:pr-5"
+                  style={{ width, color: 'var(--paper)' }}
+                  className="font-medium text-[0.68rem] uppercase tracking-[0.05em] text-left px-4 py-3 align-middle"
                 >
                   {label}
                 </th>
@@ -161,51 +231,58 @@ export function HeatmapTable({ rows }: Props) {
             {filtered.map((row, i) => (
               <tr
                 key={row.id}
-                className={`border-b border-[rgba(196,184,160,0.2)] transition-colors
-                            hover:bg-[#EFE9DE]
-                            ${row.risk_level === 'red'
-                              ? 'shadow-[inset_2px_0_0_0_#C0392B] hover:bg-[rgba(192,57,43,0.04)]'
-                              : ''}
-                            ${i % 2 === 1 ? 'bg-[rgba(196,184,160,0.2)]' : 'bg-white'}`}
+                style={{
+                  background: i % 2 === 0 ? '#fff' : 'var(--mist)',
+                  borderBottom: 'var(--border-hairline)',
+                  ...(row.risk_level === 'red' ? { boxShadow: 'inset 3px 0 0 0 var(--coal)' } : {}),
+                }}
               >
                 {/* Vendor */}
-                <td className="px-4 py-4 align-top first:pl-5">
-                  <span className="font-bold text-[#1C1C1C] text-[0.85rem]">{row.vendor_name}</span>
+                <td className="px-4 py-3.5 align-top">
+                  <div className="flex items-start gap-2">
+                    <StackToggle
+                      vendorId={row.vendor_id}
+                      vendorName={row.vendor_name}
+                      isInStack={stack.has(row.vendor_id)}
+                      onToggle={handleStackToggle}
+                    />
+                    <span className="font-medium text-[0.82rem]" style={{ color: 'var(--coal)' }}>{row.vendor_name}</span>
+                  </div>
                 </td>
 
                 {/* Feature */}
-                <td className="px-4 py-4 align-top">
-                  <span className="font-medium text-[#1C1C1C]">{row.feature_name}</span>
+                <td className="px-4 py-3.5 align-top">
+                  <span className="font-medium" style={{ color: 'var(--coal)' }}>{row.feature_name}</span>
                   {row.feature_desc && (
-                    <span className="block mt-0.5 text-[#9B9B8C] text-[0.78rem]">
+                    <span className="block mt-0.5 text-[0.74rem]" style={{ color: 'var(--slate)' }}>
                       {row.feature_desc}
                     </span>
                   )}
                 </td>
 
                 {/* Risk */}
-                <td className="px-4 py-4 align-top">
-                  <RiskPill level={row.risk_level} />
+                <td className="px-4 py-3.5 align-top">
+                  <RiskIndicator level={row.risk_level} />
                 </td>
 
                 {/* Default state */}
-                <td className="px-4 py-4 align-top">
+                <td className="px-4 py-3.5 align-top">
                   <StateCell state={row.default_state} note={row.default_state_note ?? undefined} />
                 </td>
 
                 {/* Annex III */}
-                <td className="px-4 py-4 align-top">
-                  <span className="font-medium text-[#1C1C1C] text-[0.78rem]">
+                <td className="px-4 py-3.5 align-top">
+                  <span className="meta" style={{ color: 'var(--coal)' }}>
                     {row.annex_iii_ref}
-                    <span className="block text-[#9B9B8C] font-normal text-[0.74rem] mt-0.5">
-                      {row.annex_iii_category}
-                    </span>
+                  </span>
+                  <span className="block text-[0.72rem] mt-0.5" style={{ color: 'var(--slate)' }}>
+                    {row.annex_iii_category}
                   </span>
                 </td>
 
                 {/* Obligation gap */}
-                <td className="px-4 py-4 align-top last:pr-5">
-                  <span className="text-[#1C1C1C] leading-relaxed">{row.deployer_obligation_gap}</span>
+                <td className="px-4 py-3.5 align-top">
+                  <span className="text-[0.78rem] leading-relaxed" style={{ color: 'var(--coal)' }}>{row.deployer_obligation_gap}</span>
                 </td>
               </tr>
             ))}
@@ -213,10 +290,8 @@ export function HeatmapTable({ rows }: Props) {
         </table>
 
         {filtered.length === 0 && (
-          <div className="py-10 text-center text-[#9B9B8C] text-[0.9rem]">
-            <strong className="text-[#1C1C1C] font-bold">No findings match your filters.</strong>
-            <br />
-            Try selecting <em>All vendors</em> or resetting the risk level to <em>All</em>.
+          <div className="py-10 text-center" style={{ color: 'var(--slate)' }}>
+            No findings match your filters.
           </div>
         )}
       </div>
